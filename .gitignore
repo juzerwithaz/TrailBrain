@@ -1,0 +1,4 @@
+MODULE*.MD
+__pycache__/
+*.pyc
+.env
