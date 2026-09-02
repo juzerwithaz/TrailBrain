@@ -1,117 +1,74 @@
 import os
 import sys
+from pathlib import Path
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 import json
 
-def generate_dummy_dem(filepath):
-    """Generates a dummy 100x100 DEM file for testing."""
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    
-    # 100x100 grid
-    x = np.linspace(-5, 5, 100)
-    y = np.linspace(-5, 5, 100)
-    X, Y = np.meshgrid(x, y)
-    
-    # A moderate hill in the center
-    Z = 300 * np.exp(-(X**2 + Y**2) / 2.0)
-    
-    # Base elevation of 100m
-    Z += 100.0
-    
-    # Coordinates for SF area roughly
-    lon_start = -122.45
-    lat_start = 37.75
-    # Pixel size roughly 10 meters (in degrees approx 0.0001)
-    pixel_size = 0.0001
-    
-    transform = from_origin(lon_start, lat_start + (100 * pixel_size), pixel_size, pixel_size)
-    
-    with rasterio.open(
-        filepath,
-        'w',
-        driver='GTiff',
-        height=Z.shape[0],
-        width=Z.shape[1],
-        count=1,
-        dtype=Z.dtype,
-        crs='+proj=latlong',
-        transform=transform,
-    ) as dst:
-        dst.write(Z, 1)
-
+# Ensure routing module is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from engine import compute_route, tobler_hiking_speed_kmh
 
 def run_test():
-    dem_path = '../data/dem_tile.tif'
-    # Always generate to pick up any changes to the hill shape
-    print("Generating steep dummy DEM...")
-    generate_dummy_dem(dem_path)
+    print("========================================")
+    print("       TRAILBRAIN ROUTING ENGINE TEST    ")
+    print("========================================")
     
-    # Must add current dir to path to import engine
-    sys.path.append(os.path.dirname(__file__))
-    from engine import compute_route
+    # 1. Test Tobler's Hiking Speed Formula
+    print("\n--- 1. Testing Tobler Hiking Physics ---")
+    flat_speed = tobler_hiking_speed_kmh(0.0)
+    downhill_speed = tobler_hiking_speed_kmh(-0.05)
+    uphill_gentle = tobler_hiking_speed_kmh(0.15)
+    uphill_steep = tobler_hiking_speed_kmh(0.40)
     
-    # Start and end coordinates closer to the central hill 
-    # to force traversal of slopes rather than skirting flat map boundaries
+    print(f"Flat Ground (0% grade):      {flat_speed:.2f} km/h (Expected ~5.03 km/h)")
+    print(f"Gentle Downhill (-5% grade): {downhill_speed:.2f} km/h (Expected ~6.00 km/h - Peak)")
+    print(f"Gentle Uphill (+15% grade):  {uphill_gentle:.2f} km/h (Expected ~2.98 km/h)")
+    print(f"Steep Uphill (+40% grade):   {uphill_steep:.2f} km/h (Expected ~1.25 km/h)")
+    
+    assert downhill_speed > flat_speed > uphill_gentle > uphill_steep, "Tobler curve monotonicity failure!"
+    print(">> Tobler Hiking Curve: PASS")
+
+    # 2. Test Terrain-Aware Pathfinding over Central Hill
+    print("\n--- 2. Testing 3D Terrain A* Pathfinding ---")
     start_lat = 37.7535
     start_lon = -122.4465
     end_lat = 37.7565
     end_lon = -122.4435
     
-    print(f"Testing route computation...")
-    print(f"Start: ({start_lat}, {start_lon})")
-    print(f"End: ({end_lat}, {end_lon})\n")
-    
-    # Run 1: No obstacle penalty (multiplier = 1)
-    # Using slope_penalty_factor = 0.0 means this will just find the shortest 2D path (a straight line)
-    print("--- Run 1: obstacle_penalty_multiplier = 1 ---")
-    result_1 = compute_route(
+    # Run A: Low obstacle penalty (goes straight across hill)
+    result_straight = compute_route(
         start_lat=start_lat,
         start_lon=start_lon,
         end_lat=end_lat,
         end_lon=end_lon,
-        slope_penalty_factor=0.0,
         obstacle_penalty_multiplier=1.0,
-        slope_threshold=0.5,
-        base_speed_kmh=15.0
+        slope_threshold=0.6
     )
     
-    nodes_1 = len(result_1['route'])
-    print(f"Route length: {nodes_1} nodes")
-    print(f"Distance: {result_1['distance_km']} km")
-    print(f"ETA: {result_1['eta_minutes']} minutes")
-    print("Route Coordinates:")
-    for c in result_1['route']:
-        print(f"  [{c[0]:.4f}, {c[1]:.4f}]")
-    print("\n")
-
-    # Run 2: High obstacle penalty (multiplier = 50)
-    # This will curve around the hill to avoid slopes > 0.5
-    print("--- Run 2: obstacle_penalty_multiplier = 50 ---")
-    result_500 = compute_route(
+    # Run B: High obstacle penalty (skirts around the hill)
+    result_skirt = compute_route(
         start_lat=start_lat,
         start_lon=start_lon,
         end_lat=end_lat,
         end_lon=end_lon,
-        slope_penalty_factor=0.0,
         obstacle_penalty_multiplier=50.0,
-        slope_threshold=0.5,
-        base_speed_kmh=15.0
+        slope_threshold=0.3
     )
     
-    nodes_500 = len(result_500['route'])
-    print(f"Route length: {nodes_500} nodes")
-    print(f"Distance: {result_500['distance_km']} km")
-    print(f"ETA: {result_500['eta_minutes']} minutes")
-    print("Route Coordinates:")
-    for c in result_500['route']:
-        print(f"  [{c[0]:.4f}, {c[1]:.4f}]")
-    print("\n")
+    print(f"Straight-through route length: {len(result_straight['route'])} nodes, Dist: {result_straight['distance_km']} km, ETA: {result_straight['eta_minutes']} min, Max Slope: {result_straight['max_slope_percent']}%, Rating: {result_straight['difficulty_rating']}")
+    print(f"Terrain-avoiding route length: {len(result_skirt['route'])} nodes, Dist: {result_skirt['distance_km']} km, ETA: {result_skirt['eta_minutes']} min, Max Slope: {result_skirt['max_slope_percent']}%, Rating: {result_skirt['difficulty_rating']}")
     
-    # Compare
-    routes_are_identical = result_1['route'] == result_500['route']
-    print(f"Are the two routes identical? {'YES' if routes_are_identical else 'NO'}")
+    print(f"Ascent straight: {result_straight['total_ascent_m']}m vs Ascent skirt: {result_skirt['total_ascent_m']}m")
+    print(f"Elevation Profile samples: {len(result_skirt['elevation_profile'])} points")
+    print(f"First waypoint profile: {result_skirt['elevation_profile'][0]}")
+    print(f"Last waypoint profile:  {result_skirt['elevation_profile'][-1]}")
+    
+    assert len(result_skirt['route']) > 0, "No route generated!"
+    assert len(result_skirt['elevation_profile']) == len(result_skirt['route']), "Elevation profile mismatch!"
+    
+    print("\n>> All Routing Engine Tests PASSED successfully!")
 
 if __name__ == "__main__":
     run_test()
